@@ -1,0 +1,78 @@
+name: build-do-nothing-app
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout-repository
+        uses: actions/checkout@v4
+
+      - name: set-up-jdk
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: compile-and-package
+        run: |
+          set -e
+
+          export ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)
+          platform=$(find "$ANDROID_HOME/platforms" -name "android.jar" 2>/dev/null | sort -V | tail -n 1)
+
+          if [ -z "$platform" ] || [ ! -f "$platform" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34"
+            platform="$ANDROID_HOME/platforms/android-34/android.jar"
+          fi
+
+          if [ -z "$build_tools" ] || [ ! -d "$build_tools" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0"
+            build_tools="$ANDROID_HOME/build-tools/34.0.0"
+          fi
+
+          mkdir -p bin
+
+          javac -source 8 -target 8 -Xlint:-options -cp "$platform" -d bin src/com/do_nothing_app/main_activity.java
+
+          "$build_tools/d8" --min-api 21 --output . bin/com/do_nothing_app/main_activity.class
+
+          "$build_tools/aapt2" link \
+            -I "$platform" \
+            --manifest AndroidManifest.xml \
+            --min-sdk-version 21 \
+            --target-sdk-version 33 \
+            -o unaligned.apk
+
+          zip -j -u unaligned.apk classes.dex
+
+          "$build_tools/zipalign" -f 4 unaligned.apk aligned.apk
+
+          keytool -genkeypair \
+            -keystore do_nothing.keystore \
+            -storepass android \
+            -alias androidkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=do-nothing-app"
+
+          "$build_tools/apksigner" sign \
+            --ks do_nothing.keystore \
+            --ks-pass pass:android \
+            --ks-key-alias androidkey \
+            --key-pass pass:android \
+            --out do-nothing-app.apk \
+            aligned.apk
+
+      - name: upload-apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: do-nothing-app
+          path: do-nothing-app.apk
+          retention-days: 7
